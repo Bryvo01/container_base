@@ -1,0 +1,522 @@
+version: "3.9"
+ 
+########################### NETWORKS
+networks:
+  t2_proxy:
+    name: t2_proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.90.0/24
+  default:
+    driver: bridge
+  socket_proxy:
+    name: socket_proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.91.0/24
+
+########################### EXTENSION FIELDS
+# Helps eliminate repetition of sections
+# More info on how to use this https://github.com/htpcBeginner/docker-traefik/pull/228
+
+# Common environment values
+x-environment: &default-tz-puid-pgid
+  TZ: $TZ
+  PUID: $PUID
+  PGID: $PGID
+
+# Proxy Network and Security
+x-network-and-security: &network-and-security
+  networks:
+    - t2_proxy
+
+# Keys common to some of the services in basic-services.txt
+x-common-keys-core: &common-keys-core
+  <<: *network-and-security
+  restart: always
+  # profiles:
+  # - core
+
+# Keys common to some of the services in basic-services.txt
+x-common-keys-monitoring: &common-keys-monitoring
+  <<: *network-and-security
+  restart: always
+  # profiles:
+  # - monitoring
+
+# Keys common to some of the dependent services/apps
+x-common-keys-apps: &common-keys-apps
+  <<: *network-and-security
+  restart: unless-stopped
+  # profiles:
+  # - apps
+
+# Keys common to some of the services in media-services.txt
+x-common-keys-media: &common-keys-media
+  <<: *network-and-security
+  restart: "no"
+  # profiles:
+  # - media
+ 
+########################### SERVICES
+services:
+# All services / apps go below this line
+ 
+# Traefik 2 - Reverse Proxy
+  traefik:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    container_name: traefik
+    image: traefik:2.2.1 # the chevrotin tag refers to v2.2.x but introduced a breaking change in 2.2.2
+    command: # CLI arguments
+      - --global.checkNewVersion=true
+      - --global.sendAnonymousUsage=true
+      - --entryPoints.http.address=:80
+      - --entryPoints.https.address=:443
+      - --entryPoints.traefik.address=:8080
+      - --api=true
+      - --api.dashboard=true
+      - --log=true
+      - --log.level=INFO # (Default: error) DEBUG, INFO, WARN, ERROR, FATAL, PANIC
+      - --accessLog=true
+      - --accessLog.filePath=/traefik.log
+      - --accessLog.bufferingSize=100 # Configuring a buffer of 100 lines
+      - --accessLog.filters.statusCodes=400-499
+      - --providers.docker=true
+      - --providers.docker.endpoint=unix:///var/run/docker.sock
+      #- --providers.docker.endpoint=tcp://socket-proxy:2375
+      - --providers.docker.exposedByDefault=false
+      - --entrypoints.https.http.tls.options=tls-opts@file
+      # Add dns-godaddy as default certresolver for all services. Also enables TLS and no need to specify on individual services
+      - --entrypoints.https.http.tls.certresolver=dns-godaddy
+      - --entrypoints.https.http.tls.domains[0].main=$DOMAINNAME0
+      - --entrypoints.https.http.tls.domains[0].sans=*.$DOMAINNAME0
+      - --providers.docker.network=t2_proxy
+      - --providers.docker.swarmMode=false
+      - --providers.file.directory=/rules # Load dynamic configuration from one or more .toml or .yml files in a directory.
+      - --providers.file.watch=true # Only works on top level files in the rules folder
+        #      - --certificatesResolvers.dns-godaddy.acme.caServer=https://acme-staging-v02.api.letsencrypt.org/directory # LetsEncrypt Staging Server - uncomment when testing
+      - --certificatesResolvers.dns-godaddy.acme.email=$GODADDY_EMAIL
+      - --certificatesResolvers.dns-godaddy.acme.storage=/acme.json
+      - --certificatesResolvers.dns-godaddy.acme.dnsChallenge.provider=godaddy
+      - --certificatesResolvers.dns-godaddy.acme.dnsChallenge.resolvers=1.1.1.1:53,1.0.0.1:53
+      - --certificatesResolvers.dns-godaddy.acme.dnsChallenge.delayBeforeCheck=90 # To delay DNS check and reduce LE hitrate
+    networks:
+      - t2_proxy
+      # t2_proxy:
+        # ipv4_address: 192.168.90.254
+      - socket_proxy
+    #healthcheck:
+    #  test: ["CMD", "traefik", "healthcheck", "--ping"]
+    #  interval: 5s
+    #  retries: 3
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+      - target: 443
+        published: 443
+        protocol: tcp
+        mode: host
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: host
+    volumes:
+      - $DOCKERDIR/traefik2/rules:/rules 
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - $DOCKERDIR/traefik2/acme/acme.json:/acme.json 
+      - $DOCKERDIR/traefik2/traefik.log:/traefik.log 
+      - $DOCKERDIR/shared:/shared
+    environment:
+      - GODADDY_API_KEY=$GODADDY_API_KEY
+      - GODADDY_API_SECRET=$GODADDY_API_SECRET
+    labels:
+      - "traefik.enable=true"
+      # HTTP-to-HTTPS Redirect
+      - "traefik.http.routers.http-catchall.entrypoints=http"
+      - "traefik.http.routers.http-catchall.rule=HostRegexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      # HTTP Routers
+      - "traefik.http.routers.traefik-rtr.entrypoints=https"
+      - "traefik.http.routers.traefik-rtr.rule=Host(`traefik.$DOMAINNAME0`)" #  && (PathPrefix(`/api/`) || PathPrefix(`/dashboard/`))"
+        #- "traefik.http.routers.traefik-rtr.tls.certresolver=dns-godaddy" # Comment out this line after first run of traefik to force the use of wildcard certs
+      ## Services - API
+      - "traefik.http.routers.traefik-rtr.service=api@internal"
+      ## Middlewares
+      - "traefik.http.routers.traefik-rtr.middlewares=chain-oauth@file"
+
+  # Whoami
+  whoami:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    container_name: whoami
+    image: traefik/whoami
+    labels:
+      - "traefik.thhp.routers.whoami.rule=Host(`whoami.$DOMAINNAME0`)"
+
+  # Docker Socket Proxy - Security Enchanced Proxy for Docker Socket
+  socket-proxy:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    container_name: socket-proxy
+    image: tecnativa/docker-socket-proxy
+    networks:
+      - socket_proxy
+      # socket_proxy:
+      #   ipv4_address: 192.168.91.254 # You can specify a static IP
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    environment:
+      - LOG_LEVEL=warn # debug,info,notice,warning,err,crit,alert,emerg
+      ## Variables match the URL prefix (i.e. AUTH blocks access to /auth/* parts of the API, etc.).
+      # 0 to revoke access.
+      # 1 to grant access.
+      ## Granted by Default
+      - EVENTS=1
+      - PING=1
+      - VERSION=1
+      ## Revoked by Default
+      # Security critical
+      - AUTH=0
+      - SECRETS=0
+      - POST=1 # Watchtower
+      # Not always needed
+      - BUILD=0
+      - COMMIT=0
+      - CONFIGS=0
+      - CONTAINERS=1 # Traefik, portainer, etc.
+      - DISTRIBUTION=0
+      - EXEC=0
+      - IMAGES=1 # Portainer
+      - INFO=1 # Portainer
+      - NETWORKS=1 # Portainer
+      - NODES=0
+      - PLUGINS=0
+      - SERVICES=1 # Portainer
+      - SESSION=0
+      - SWARM=0
+      - SYSTEM=0
+      - TASKS=1 # Portainer
+      - VOLUMES=1 # Portainer
+
+  # Google OAuth - Single Sign On using OAuth 2.0
+  oauth:
+    container_name: oauth
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    image: thomseddon/traefik-forward-auth:latest
+    environment:
+      - CLIENT_ID=$GOOGLE_CLIENT_ID
+      - CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
+      - SECRET=$OAUTH_SECRET
+      - COOKIE_DOMAIN=$DOMAINNAME0
+      - INSECURE_COOKIE=false
+      - AUTH_HOST=oauth.$DOMAINNAME0
+      - URL_PATH=/_oauth
+      - WHITELIST=$MY_EMAIL
+      - LOG_LEVEL=warn
+      - LOG_FORMAT=text
+      - LIFETIME=2592000 # 30 days 86400 # 1 day
+      - DEFAULT_ACTION=auth
+      - DEFAULT_PROVIDER=google
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.oauth-rtr.tls=true"
+      - "traefik.http.routers.oauth-rtr.entrypoints=https"
+      - "traefik.http.routers.oauth-rtr.rule=Host(`oauth.$DOMAINNAME0`)"
+      ## Middlewares
+      - "traefik.http.routers.oauth-rtr.middlewares=chain-oauth@file"
+      ## HTTP Services
+      - "traefik.http.routers.oauth-rtr.service=oauth-svc"
+      - "traefik.http.services.oauth-svc.loadbalancer.server.port=4181"
+
+  # Portainer - WebUI for Containers
+  portainer:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    container_name: portainer
+    image: portainer/portainer-ce:latest
+    command: -H unix:///var/run/docker.sock # # Use Docker Socket Proxy instead for improved security
+    #command: -H tcp://socket-proxy:2375
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro # # Use Docker Socket Proxy instead for improved security
+      - $DOCKERDIR/portainer/data:/data # Change to local directory if you want to save/transfer config locally
+    environment:
+      - TZ=$TZ
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.portainer-rtr.entrypoints=https"
+      - "traefik.http.routers.portainer-rtr.rule=Host(`portainer.$DOMAINNAME0`)"
+      ## Middlewares
+      - "traefik.http.routers.portainer-rtr.middlewares=chain-oauth@file"
+      ## HTTP Services
+      - "traefik.http.routers.portainer-rtr.service=portainer-svc"
+      - "traefik.http.services.portainer-svc.loadbalancer.server.port=9000"
+
+  # Home Assistant - Smart home hub
+  homeassistant:
+    <<: *common-keys-apps # See EXTENSION FIELDS at the top
+    image: homeassistant/home-assistant
+    container_name: homeassistant
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyUSB1:/dev/ttyUSB1
+      - /dev/ttyACM0:/dev/ttyACM0
+    volumes:
+      - $DOCKERDIR/homeassistant:/config
+      - /etc/localtime:/etc/localtime:ro
+      - $DOCKERDIR/shared:/shared
+        #ports:
+        #"8123:8123"
+    privileged: true
+    environment:
+      <<: *default-tz-puid-pgid
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.homeassistant-rtr.entrypoints=https"
+      - "traefik.http.routers.homeassistant-rtr.rule=Host(`homeassistant.$DOMAINNAME0`)"
+      ## Middlewares
+      - "traefik.http.routers.homeassistant-rtr.middlewares=chain-oauth@file"
+      ## HTTP Services
+      - "traefik.http.routers.homeassistant-rtr.service=homeassistant-svc"
+      - "traefik.http.services.homeassistant-svc.loadbalancer.server.port=8123"
+
+  # MariaDB - MySQL Database
+  mariadb:
+    <<: *common-keys-core # See EXTENSION FIELDS at the top
+    container_name: mariadb
+    image: linuxserver/mariadb:latest
+    restart: always
+    ports:
+      - "3306:3306"
+    volumes:
+      - $DOCKERDIR/mariadb/data:/config
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - PUID=$PUID
+      - PGID=$PGID
+      - MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD
+      
+  # Grafana - Graphical data visualization for InfluxDB data
+  grafana:
+    <<: *common-keys-apps # See EXTENSION FIELDS at the top
+    image: grafana/grafana:latest
+    container_name: grafana
+    user: $PUID
+    volumes:
+      - $DOCKERDIR/grafana:/var/lib/grafana
+    environment:
+      GF_INSTALL_PLUGINS: "grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel,grafana-piechart-panel"
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.grafana-rtr.entrypoints=https"
+      - "traefik.http.routers.grafana-rtr.rule=Host(`grafana.$DOMAINNAME0`)"
+      ## Middlewares
+      - "traefik.http.routers.grafana-rtr.middlewares=chain-oauth@file"
+      ## HTTP Services
+      - "traefik.http.routers.grafana-rtr.service=grafana-svc"
+      - "traefik.http.services.grafana-svc.loadbalancer.server.port=3000"
+ 
+        #unifi:
+        #  #<<: *default-tz-puid-pgid
+        #  <<: *common-keys-core
+        #  container_name: unifi2
+        #  image: linuxserver/unifi:latest
+        #  ports:
+        #    - "3478:3478/udp"
+        #    - "10001:10001/udp"
+        #    - "8180:8080/tcp"
+        #    - "8081:8081/tcp"
+        #    - "8443:8443/tcp"
+        #    - "8880:8880/tcp"
+        #    - "6789:6789/tcp"
+        #  volumes:
+        #    - $DOCKERDIR/unifi:/config
+        #    - $DOCKERDIR/shared:/shared
+        #  environment:
+        #    <<: *default-tz-puid-pgid
+        #  labels:
+        #    - "traefik.enable=true"
+        #    - "traefik.tags=frontend"
+        #    - "traefik.frontend.passHostHeader=true"
+        #    - "traefik.admin.backend=unifi2"
+        #    - "traefik.admin.frontend.rule=Host:unifi2.${DOMAINNAME0}"
+        #    - "traefik.admin.port=8443"
+        #    - "traefik.admin.protocol=https"
+        #    - "traefik.frontend.headers.SSLRedirect=true"
+        #    - "traefik.frontend.headers.STSSeconds=315360000"
+        #    - "traefik.frontend.headers.browserXSSFilter=true"
+        #    - "traefik.frontend.headers.contentTypeNosniff=true"
+        #    - "traefik.frontend.headers.forceSTSHeader=true"
+        #    - "traefik.frontend.headers.SSLHost=example.com"
+        #    - "traefik.frontend.headers.STSIncludeSubdomains=true"
+        #    - "traefik.frontend.headers.STSPreload=true"
+        #    - "traefik.frontend.headers.frameDeny=true"
+        #    ## HTTP Routers
+        #    - "traefik.http.routers.unifi-rtr.entrypoints=https"
+        #    - "traefik.http.routers.unifi-rtr.rule=Host(`unifi2.$DOMAINNAME0`)"
+        #    ## Middlewares
+        #    - "traefik.http.routers.unifi-rtr.middlewares=chain-oauth@file"
+        #    ## HTTP Services
+        #    - "traefik.http.routers.unifi-rtr.service=unifi-svc"
+        #    - "traefik.http.services.unifi-svc.loadbalancer.server.port=8443"
+      
+  # PiHole - A blackhole for ads
+  #pihole:
+  #  <<: *common-keys-core # See EXTENSION FIELDS at the top
+  #  container_name: pihole2
+  #  domainname: garflak.com
+  #  image: pihole/pihole:latest
+  #  # For DHCP it is recommended to remove these ports and instead add: network_mode: "host"
+  #  ports:
+  #    - '53:53/tcp'
+  #    - '53:53/udp'
+  #    - '8182:80'
+  #    - '8443:443'
+  #  environment:
+  #    - TZ=$TZ
+  #    - PIHOLE_UID=0
+  #    - DNSMASQ_USER=root
+  #    - PIHOLE_DNS_=127.0.0.1#5335
+  #    - WEBPASSWORD=password
+  #    - WEBTHEME=default-dark
+  #    - ServerIP=$HOST_IP
+  #    - DNSSEC=true
+  #    - DNS_BOGUS_PRIV=true
+  #      #- REV_SERVER=true
+  #      #- REV_SERVER_DOMAIN=$DOMAINNAME0
+  #      #- REV_SERVER_TARGET=gumdrop.$DOMAINNAME0
+  #    - PROXY_LOCATION=pihole2
+  #    - VIRTUAL_HOST=pihole2.$DOMAINNAME0
+  #    - VIRTUAL_PORT=80
+  #  volumes: 
+  #    - $DOCKERDIR/pihole:/etc/pihole
+  #    - $DOCKERDIR/pihole:/etc/dnsmasq.d
+  #    - $DOCKERDIR/pihole:/var/log/pihole.log
+  #  labels:
+  #    - "traefik.enable=true"
+  #    - "traefik.backend=pihole2"
+  #    - "traefik.port=80"
+  #    - "traefik.frontend.rule=HostRegexp:pihole2.${DOMAINNAME0},{CATCHALL:.*}"
+  #    - "traefik.frontend.priority=1"
+  #    - traefik.frontend.headers.SSLRedirect=true
+  #    - traefik.frontend.headers.STSSeconds=315360000
+  #    - traefik.frontend.headers.browserXSSFilter=true
+  #    - traefik.frontend.headers.contentTypeNosniff=true
+  #    - traefik.frontend.headers.forceSTSHeader=true
+  #    - traefik.frontend.headers.SSLHost=${DOMAINNAME0}
+  #    - traefik.frontend.headers.STSIncludeSubdomains=true
+  #    - traefik.frontend.headers.STSPreload=true
+  #    - traefik.frontend.headers.frameDeny=true
+  #    ## HTTP Routers
+  #    - "traefik.http.routers.pihole-rtr.entrypoints=https"
+  #    - "traefik.http.routers.pihole-rtr.rule=Host(`pihole2.$DOMAINNAME0`)"
+  #    ## Middlewares
+  #    - "traefik.http.routers.pihole-rtr.middleware=chain-oauth@file"
+  #    ## HTTP Services
+  #    - "traefik.http.routers.pihole-rtr.service=pihole-svc"
+  #    - "traefik.http.services.pihole-svc.loadbalancer.server.port=8443"
+
+
+#  # Guacamole - Remote desktop, SSH, on Telnet on any HTML5 Browser
+#  # Create all databases and tables first
+#  guacamole:
+#    <<: *common-keys-apps # See EXTENSION FIELDS at the top
+#    image: guacamole/guacamole:latest
+#    container_name: guacamole
+#    networks:
+#      - t2_proxy
+#      - default
+#    # ports:
+#    #   - "$GUACAMOLE_PORT:8080"
+#    environment:
+#      GUACD_HOSTNAME: guacd
+#      MYSQL_HOSTNAME: $MARIADB_HOST
+#      MYSQL_PORT: $MARIADB_PORT
+#      MYSQL_DATABASE_FILE: /run/secrets/guac_db_name
+#      MYSQL_USER_FILE: /run/secrets/guac_mysql_user
+#      MYSQL_PASSWORD_FILE: /run/secrets/guac_mysql_password
+#    secrets:
+#      - guac_db_name
+#      - guac_mysql_user
+#      - guac_mysql_password
+#    labels:
+#      - "traefik.enable=true"
+#      ## HTTP Routers
+#      - "traefik.http.routers.guacamole-rtr.entrypoints=https"
+#      - "traefik.http.routers.guacamole-rtr.rule=Host(`guac.$DOMAINNAME0`)"
+#      ## Middlewares
+#      - "traefik.http.routers.guacamole-rtr.middlewares=chain-oauth@file,add-guacamole"
+#      - "traefik.http.middlewares.add-guacamole.addPrefix.prefix=/guacamole"
+#      ## HTTP Services
+#      - "traefik.http.routers.guacamole-rtr.service=guacamole-svc"
+#      - "traefik.http.services.guacamole-svc.loadbalancer.server.port=8080"
+#
+#  # Guacamole Daemon - Needed for Guacamole
+#  guacd:
+#    <<: *common-keys-apps # See EXTENSION FIELDS at the top
+#    image: guacamole/guacd
+#    container_name: guacd
+#    restart: unless-stopped
+#
+#  # Firefox - Web Broswer
+#  # VNC password not working - check
+#  firefox:
+#    <<: *common-keys-apps # See EXTENSION FIELDS at the top
+#    image: jlesage/firefox:latest
+#    container_name: firefox
+#    security_opt:
+#      - no-new-privileges:true
+#      - seccomp:unconfined # October 15, 2020 https://github.com/jlesage/docker-firefox/blob/master/README.md#allowing-the-membarrier-system-call
+#    # ports:
+#    #   - "$FIREFOX_PORT:5800"
+#    volumes:
+#      - $DOCKERDIR/firefox:/config
+#      - $DATADIR/downloads:/data/downloads
+#      - /dev/shm:/dev/shm
+#    environment:
+#      USER_ID: $PUID
+#      GROUP_ID: $PGID
+#      TZ: $TZ
+#      UMASK: 002
+#      KEEP_APP_RUNNING: 1
+#      CLEAN_TMP_DIR: 1
+#      DISPLAY_WIDTH: 1920
+#      DISPLAY_HEIGHT: 1080
+#      VNC_PASSWD: $FIREFOX_VNC_PASSWD
+#    labels:
+#      - "traefik.enable=true"
+#      ## HTTP Routers
+#      - "traefik.http.routers.firefox-rtr.entrypoints=https"
+#      - "traefik.http.routers.firefox-rtr.rule=Host(`firefox.$DOMAINNAME0`)"
+#      ## Middlewares
+#      - "traefik.http.routers.firefox-rtr.middlewares=chain-oauth@file"
+#      ## HTTP Services
+#      - "traefik.http.routers.firefox-rtr.service=firefox-svc"
+#      - "traefik.http.services.firefox-svc.loadbalancer.server.port=5800"
+
+  # Docker-GC - Automatic Docker Garbage Collection
+  # Create docker-gc-exclude file
+  #dockergc:
+  #  <<: *common-keys-apps # See EXTENSION FIELDS at the top
+  #  image: clockworksoul/docker-gc-cron:latest
+  #  container_name: docker-gc
+  #  networks:
+  #    - socket_proxy
+  #  volumes:
+  #    # - /var/run/docker.sock:/var/run/docker.sock # Use Docker Socket Proxy instead for improved security
+  #    - $DOCKERDIR/docker-gc/docker-gc-exclude:/etc/docker-gc-exclude
+  #  environment:
+  #    CRON: 0 0 0 * * ? # Everyday at midnight. Previously 0 0 * * *
+  #    FORCE_IMAGE_REMOVAL: 1
+  #    FORCE_CONTAINER_REMOVAL: 0
+  #    GRACE_PERIOD_SECONDS: 604800
+  #    DRY_RUN: 0
+  #    CLEAN_UP_VOLUMES: 1
+  #    TZ: $TZ
+  #    DOCKER_HOST: tcp://socket-proxy:2375
