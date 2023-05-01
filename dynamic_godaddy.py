@@ -4,6 +4,7 @@ import sys
 import logging
 import logging.handlers
 import requests
+import time
 
 # create logger
 logger = logging.getLogger('dynamic_gd_dns')
@@ -46,9 +47,10 @@ else:
   sys.exit(1)
                 
 # check if the addresses match, change GoDaddy if they don't
-if external_ip == gd_dns:
+while True:
+  if external_ip == gd_dns:
     logger.info(f'current External IP is {external_ip}, GoDaddy DNS IP is {gd_dns}. All is good')
-elif external_ip != gd_dns:
+  elif external_ip != gd_dns:
     logger.info(f'IP has changed from {gd_dns} to {external_ip}!! Updating GoDaddy')
     headers['Content-Type'] = 'application/json'
     data = f'[{{"data": "{external_ip}"}}]'
@@ -59,6 +61,6 @@ elif external_ip != gd_dns:
     else:
       logger.error(f'Received {gd_dns_request.status_code} from GoDaddy with info:\n\t\t'
                    f'GoDaddy IP address probably NOT CHANGED.')
-else:
+  else:
     logger.warning('something terrible happened')
-
+  time.sleep(300)
