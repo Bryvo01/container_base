@@ -1,4 +1,5 @@
 ## GoDaddy
+(copied/modified from https://www.instructables.com/Quick-and-Dirty-Dynamic-DNS-Using-GoDaddy/)<br\>
 Add an A record in GoDaddy.
 
 For "Type" make sure to use "A" -- CNAME won't work.
