@@ -28,8 +28,8 @@ my_domain = 'garflak.com' # name of GoDaddy domain
 gd_hostname = 'gateway' # name of DNS record in GoDaddy to look for
 gd_api_key = 'AQ8opxtekmU_TgxBdVxeRDXwQyQt85KqCh' # GoDaddy API key
 gd_secret = '3MTFiBZyKJpyyh2FFVhL3V' # GoDaddy secret
-ipify_url = 'https://api.ipify.org' # ipify - to get current external IP address
-gd_url = f'https://api6.godaddy.com/v1/domains/{my_domain}/records/A/{gd_hostname}'# GoDaddy API URL
+ipify_url = 'https://api6.ipify.org' # ipify - to get current external IP address
+gd_url = f'https://api.godaddy.com/v1/domains/{my_domain}/records/A/{gd_hostname}'# GoDaddy API URL
 headers = {'Authorization': f'sso-key {gd_api_key}:{gd_secret}'}
 
 external_ip = requests.get(ipify_url).text
